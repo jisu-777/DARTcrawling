@@ -1,0 +1,37 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Generated files
+dart_result.xlsx
+~$*.xlsx
+~$*.xls
+
+# Temporary files
+file/
+*.tmp
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
