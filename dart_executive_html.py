@@ -9,6 +9,10 @@ import pandas as pd
 import zipfile
 import io
 import xml.etree.ElementTree as ET
+import asyncio
+import json
+import os
+from openai import AsyncOpenAI
 
 
 def get_viewer_url(main_url: str, debug: bool = False) -> Optional[str]:
@@ -192,7 +196,12 @@ def parse_registered_executives_from_xml(xml_text: str, debug: bool = False) -> 
         
         # BeautifulSoup으로 XML 파싱 (더 관대한 파서)
         # 'html.parser'를 사용하면 XML도 파싱 가능하고 더 관대함
-        soup = BeautifulSoup(xml_text, 'html.parser')
+        # 경고 무시
+        import warnings
+        from bs4 import XMLParsedAsHTMLWarning
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+            soup = BeautifulSoup(xml_text, 'html.parser')
         
         # "가. 등기임원" 또는 "가. 임원 현황" 텍스트를 포함하는 요소 찾기
         target_table = None
@@ -320,31 +329,16 @@ def parse_registered_executives_from_xml(xml_text: str, debug: bool = False) -> 
             print(f"  [DEBUG] 추출된 데이터 행 수: {len(rows)}")
             if rows:
                 print(f"  [DEBUG] 첫 번째 데이터 행 샘플: {rows[0][:5]}")
+                print(f"  [DEBUG] 모든 행을 데이터로 처리 (첫 번째 행 포함): 총 {len(rows)}행")
         
         if not rows:
             if debug:
                 print(f"  [DEBUG] 테이블에서 데이터 행을 찾지 못함")
             return None
         
-        # 첫 번째 행이 헤더인지 확인 (성명, 직위 등 키워드 포함)
+        # 첫 번째 행도 데이터로 처리 (헤더로 인식하지 않음)
+        # 모든 행을 AI가 분석하도록 함 - 첫 번째 행 제거하지 않음!
         header_row = None
-        if rows:
-            first_row_text = ' '.join(rows[0]).lower()
-            # 첫 번째 행이 헤더인지 확인 (성명, 직위, 등기임원 등 키워드 포함)
-            is_header = (
-                '성명' in first_row_text or 
-                '이름' in first_row_text or 
-                '직위' in first_row_text or
-                '등기임원' in first_row_text or
-                '상근' in first_row_text
-            )
-            
-            if is_header:
-                # 첫 번째 행이 헤더면 제거
-                header_row = rows[0]
-                rows = rows[1:]
-                if debug:
-                    print(f"  [DEBUG] 첫 번째 행을 헤더로 인식하고 제거: {header_row[:5]}")
         
         # 행 길이 맞추기
         if rows:
@@ -352,18 +346,14 @@ def parse_registered_executives_from_xml(xml_text: str, debug: bool = False) -> 
             for i, row in enumerate(rows):
                 rows[i] = row + [''] * (max_cols - len(row))
         
-        # DataFrame 생성 (헤더가 있으면 사용, 없으면 숫자로)
-        if header_row:
-            # 헤더 길이도 맞추기
-            header_row = header_row + [''] * (max_cols - len(header_row))
-            df = pd.DataFrame(rows, columns=header_row[:max_cols])
-        else:
-            df = pd.DataFrame(rows)
+        # DataFrame 생성 (헤더 없이 숫자 인덱스로) - 모든 행 포함
+        df = pd.DataFrame(rows)
         
         if debug:
-            print(f"  [DEBUG] 직접 파싱 완료: {len(df)}행, {len(df.columns)}열")
+            print(f"  [DEBUG] 직접 파싱 완료: {len(df)}행, {len(df.columns)}열 (첫 번째 행 포함)")
             if len(df) > 0:
-                print(f"  [DEBUG] 첫 번째 행 샘플: {list(df.iloc[0])[:5]}")
+                print(f"  [DEBUG] 첫 번째 행 샘플 (제거되지 않음): {list(df.iloc[0])[:5]}")
+                print(f"  [DEBUG] 마지막 행 샘플: {list(df.iloc[-1])[:5] if len(df) > 1 else 'N/A'}")
         
         # MultiIndex 헤더 처리
         if isinstance(df.columns, pd.MultiIndex):
@@ -521,14 +511,10 @@ def parse_registered_executives(viewer_html: str, debug: bool = False) -> Option
         tbody = target_table.find('tbody')
         data_rows = tbody.find_all('tr') if tbody else target_table.find_all('tr')
         
-        # 헤더 행이 없으면 첫 번째 행을 헤더로 사용
-        if not header_row and data_rows:
-            first_row = data_rows[0]
-            cells = first_row.find_all(['td', 'th'])
-            header_row = [cell.get_text(strip=True) for cell in cells]
-            data_rows = data_rows[1:]  # 첫 번째 행 제외
+        # thead가 있으면 헤더로 사용, 없으면 헤더 없이 모든 행을 데이터로 처리
+        # 첫 번째 행도 데이터로 처리하여 AI가 모두 분석하도록 함
         
-        # 데이터 행 파싱
+        # 데이터 행 파싱 (모든 행 포함)
         for tr in data_rows:
             cells = tr.find_all(['td', 'th'])
             row_data = [cell.get_text(strip=True) for cell in cells]
@@ -540,7 +526,7 @@ def parse_registered_executives(viewer_html: str, debug: bool = False) -> Option
                 print(f"  [DEBUG] 테이블에서 데이터 행을 찾지 못함")
             return None
         
-        # DataFrame 생성
+        # DataFrame 생성 (thead가 있으면 헤더 사용, 없으면 모든 행을 데이터로 처리)
         if header_row:
             # 헤더와 행 길이 맞추기
             max_cols = max(len(header_row), max(len(row) for row in rows) if rows else 0)
@@ -549,7 +535,7 @@ def parse_registered_executives(viewer_html: str, debug: bool = False) -> Option
                 rows[i] = row + [''] * (max_cols - len(row))
             df = pd.DataFrame(rows, columns=header_row)
         else:
-            # 헤더가 없으면 숫자로 컬럼명 생성
+            # 헤더가 없으면 모든 행을 데이터로 처리 (숫자 인덱스로 컬럼명 생성)
             max_cols = max(len(row) for row in rows) if rows else 0
             for i, row in enumerate(rows):
                 rows[i] = row + [''] * (max_cols - len(row))
@@ -823,10 +809,10 @@ def extract_registered_executives(
     api_key: str = "",
     base_url: str = "",
     debug: bool = False
-) -> List[Dict]:
+) -> Optional[pd.DataFrame]:
     """
-    DART 보고서에서 등기임원 정보를 추출합니다.
-    DART OpenAPI를 우선 사용하고, 실패 시 HTML 스크래핑을 시도합니다.
+    DART 보고서에서 등기임원 테이블을 추출합니다.
+    DART OpenAPI document.xml을 통해 XML을 가져와 파싱합니다.
     
     Args:
         rcp_no: 보고서 접수번호
@@ -834,16 +820,16 @@ def extract_registered_executives(
         corp_name: 회사명
         stock_code: 종목코드
         report_type: 보고서 유형
-        api_key: DART API 키 (선택)
-        base_url: DART API 베이스 URL (선택)
+        api_key: DART API 키
+        base_url: DART API 베이스 URL
         debug: 디버그 로그 출력 여부
     
     Returns:
-        임원 정보 리스트
+        파싱된 DataFrame 또는 None
     """
     df = None
     
-    # 방법 1: DART OpenAPI document.xml로 보고서 전문 가져오기 (우선)
+    # DART OpenAPI document.xml로 보고서 전문 가져오기
     if api_key and base_url:
         xml_list = fetch_report_xml_from_api(rcp_no, api_key, base_url, debug=debug)
         if xml_list:
@@ -852,93 +838,225 @@ def extract_registered_executives(
                 df = parse_registered_executives_from_xml(xml_text, debug=debug)
                 if df is not None and not df.empty:
                     if debug:
-                        print(f"  [DEBUG] XML에서 임원 테이블 찾음")
+                        print(f"  [DEBUG] XML에서 임원 테이블 찾음: {len(df)}행")
                     break
-    
-    # 방법 2: viewer.do HTML 스크래핑 (fallback)
-    if df is None or df.empty:
-        if debug:
-            print(f"  [DEBUG] XML 파싱 실패, viewer.do HTML 스크래핑 시도")
-        
-        viewer_url = get_viewer_url(main_url, debug=debug)
-        if viewer_url:
-            for attempt in range(2):
-                try:
-                    headers = {
-                        "User-Agent": "Mozilla/5.0",
-                        "Referer": main_url,
-                    }
-                    r = requests.get(viewer_url, headers=headers, timeout=30)
-                    r.raise_for_status()
-                    report_html = r.text
-                    
-                    if debug:
-                        soup_test = BeautifulSoup(report_html, 'html.parser')
-                        tables_test = soup_test.find_all('table')
-                        print(f"  [DEBUG] viewer.do HTML 크기: {len(report_html)} bytes, table 수: {len(tables_test)}")
-                    
-                    df = parse_registered_executives(report_html, debug=debug)
-                    if df is not None and not df.empty:
-                        break
-                except Exception as e:
-                    if attempt == 0 and debug:
-                        print(f"  [DEBUG] viewer.do fetch failed, retrying: {e}")
-                    elif attempt == 1:
-                        if debug:
-                            print(f"  [DEBUG] viewer.do fetch failed after retry: {e}")
-    
-    # 방법 3: main.do HTML에서 직접 시도 (최후의 수단)
-    if df is None or df.empty:
-        if debug:
-            print(f"  [DEBUG] main.do HTML에서 직접 테이블 찾기 시도")
-        try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            r = requests.get(main_url, headers=headers, timeout=30)
-            r.raise_for_status()
-            report_html = r.text
-            df = parse_registered_executives(report_html, debug=debug)
-        except Exception as e:
-            if debug:
-                print(f"  [DEBUG] main.do HTML 가져오기 실패: {e}")
-            return []
     
     if df is None or df.empty:
         if debug:
             print(f"  [DEBUG] 테이블 파싱 결과: None 또는 빈 DataFrame")
+        return None
+    
+    # 회사 메타데이터를 DataFrame에 추가
+    df['_회사'] = corp_name
+    df['_종목코드'] = stock_code
+    df['_구분'] = report_type
+    df['_url'] = main_url
+    
+    return df
+
+
+async def map_executive_row_with_ai(
+    row: pd.Series,
+    company_meta: Dict,
+    client: AsyncOpenAI,
+    debug: bool = False
+) -> Optional[Dict]:
+    """
+    AI를 사용하여 임원 행 데이터를 정규화된 형식으로 매핑합니다.
+    
+    Args:
+        row: DataFrame의 한 행
+        company_meta: 회사 메타데이터
+        client: OpenAI AsyncClient
+        debug: 디버그 로그 출력 여부
+    
+    Returns:
+        정규화된 임원 정보 딕셔너리 또는 None
+    """
+    try:
+        # 행 데이터를 딕셔너리로 변환 (메타데이터 컬럼 제외)
+        # row가 Series이므로 to_dict()로 변환
+        row_dict_raw = row.to_dict()
+        row_dict = {}
+        
+        for col, val in row_dict_raw.items():
+            if str(col).startswith('_'):
+                continue
+            
+            # 값이 유효한지 확인 (Series 체크 제거, 이미 dict이므로)
+            if val is not None and pd.notna(val):
+                val_str = str(val).strip()
+                if val_str:
+                    row_dict[str(col)] = val_str
+        
+        if not row_dict:
+            return None
+        
+        # 컬럼명 정보도 포함
+        columns_info = list(row.index)
+        columns_info = [str(c) for c in columns_info if not str(c).startswith('_')]
+        
+        # AI 프롬프트 구성
+        prompt = f"""다음은 DART 보고서에서 추출한 임원 정보 테이블의 한 행입니다.
+컬럼명: {json.dumps(columns_info, ensure_ascii=False)}
+행 데이터: {json.dumps(row_dict, ensure_ascii=False)}
+
+이 데이터를 다음 형식의 JSON으로 매핑해주세요. 값이 없으면 빈 문자열("")로 설정하세요.
+
+필수 출력 형식:
+{{
+    "성명": "",
+    "성별": "",
+    "출생년월": "",
+    "직위": "",
+    "등기임원여부": "",
+    "상근여부": "",
+    "담당업무": "",
+    "주요경력": "",
+    "소유주식수(의결권O)": "",
+    "소유주식수(의결권X)": "",
+    "최대주주와의 관계": "",
+    "재직기간": "",
+    "임기만료일": ""
+}}
+
+컬럼명을 분석하여 적절한 필드에 매핑하세요. 예를 들어:
+- "성명", "이름", "name" 등 -> "성명"
+- "직위", "position", "직책" 등 -> "직위"
+- "소유주식수"와 "의결권" 관련 컬럼 -> "소유주식수(의결권O)" 또는 "소유주식수(의결권X)"
+- "임기", "만료일" 등 -> "임기만료일"
+
+JSON만 반환하고 다른 설명은 포함하지 마세요."""
+
+        # API 호출 재시도 로직
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                response = await client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "당신은 DART 보고서의 임원 정보를 정규화된 형식으로 매핑하는 전문가입니다. JSON 형식으로만 응답하세요."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                    timeout=30.0
+                )
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    if debug:
+                        print(f"  [DEBUG] API 호출 실패 (시도 {attempt + 1}/{max_retries}), 재시도 중...")
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+                else:
+                    raise
+        
+        result_text = response.choices[0].message.content.strip()
+        
+        # JSON 파싱 (코드 블록 제거)
+        if result_text.startswith("```"):
+            # 코드 블록 제거
+            lines = result_text.split("\n")
+            result_text = "\n".join([line for line in lines if not line.strip().startswith("```")])
+        
+        mapped_data = json.loads(result_text)
+        
+        # 필수 필드 확인 및 기본값 설정
+        required_fields = [
+            "성명", "성별", "출생년월", "직위", "등기임원여부", "상근여부",
+            "담당업무", "주요경력", "소유주식수(의결권O)", "소유주식수(의결권X)",
+            "최대주주와의 관계", "재직기간", "임기만료일"
+        ]
+        
+        # 누락된 필드 추가
+        for field in required_fields:
+            if field not in mapped_data:
+                mapped_data[field] = ""
+        
+        # 회사 메타데이터 추가
+        final_data = {
+            "회사": company_meta.get("회사", ""),
+            "종목코드": company_meta.get("종목코드", ""),
+            "구분": company_meta.get("구분", ""),
+            "url": company_meta.get("url", ""),
+            **mapped_data
+        }
+        
+        # 성명이 있는 경우에만 반환
+        if final_data.get("성명") and final_data.get("성명").strip():
+            return final_data
+        
+        return None
+        
+    except json.JSONDecodeError as e:
+        if debug:
+            print(f"  [DEBUG] AI 응답 JSON 파싱 실패: {e}")
+        return None
+    except Exception as e:
+        if debug:
+            print(f"  [DEBUG] AI 매핑 실패: {e}")
+        return None
+
+
+async def map_executives_with_ai(
+    df: pd.DataFrame,
+    company_meta: Dict,
+    openai_api_key: str,
+    debug: bool = False,
+    max_concurrent: int = 10
+) -> List[Dict]:
+    """
+    DataFrame의 모든 행을 AI를 사용하여 병렬로 매핑합니다.
+    
+    Args:
+        df: 임원 테이블 DataFrame
+        company_meta: 회사 메타데이터
+        openai_api_key: OpenAI API 키
+        debug: 디버그 로그 출력 여부
+        max_concurrent: 최대 동시 요청 수
+    
+    Returns:
+        정규화된 임원 정보 리스트
+    """
+    if df is None or df.empty:
         return []
     
-    # 4. 정규화
-    company_meta = {
-        "회사": corp_name,
-        "종목코드": stock_code,
-        "구분": report_type,
-        "url": main_url,
-    }
-    
+    client = AsyncOpenAI(api_key=openai_api_key)
     executives = []
-    skipped_count = 0
-    for idx, row in df.iterrows():
-        normalized = normalize_executive_row(row, company_meta)
-        if normalized:
-            executives.append(normalized)
-        else:
-            skipped_count += 1
-            if debug and skipped_count <= 3:  # 처음 3개만 출력
-                # 성명이 왜 없는지 확인
-                name_candidates = []
-                for col in row.index:
-                    col_str = str(col)
-                    norm_col = _normalize_text(col_str)
-                    if "성명" in norm_col or "이름" in norm_col or "name" in norm_col.lower():
-                        val = row[col]
-                        if pd.notna(val):
-                            name_candidates.append(f"{col_str}={val}")
-                if name_candidates:
-                    print(f"  [DEBUG] 행 {idx} 스킵 (성명 후보: {name_candidates})")
-                else:
-                    print(f"  [DEBUG] 행 {idx} 스킵 (성명 컬럼 없음, 컬럼: {list(row.index)[:5]})")
+    
+    # 세마포어로 동시 요청 수 제한 (너무 많은 동시 요청 방지)
+    semaphore = asyncio.Semaphore(min(max_concurrent, 7))  # 최대 5개로 제한
+    
+    async def process_row(idx, row):
+        async with semaphore:
+            try:
+                if debug and (idx == 0 or idx % 5 == 0):
+                    print(f"  [AI 매핑] {idx+1}/{len(df)} 처리 중...")
+                # row는 이미 Series이므로 그대로 전달
+                result = await map_executive_row_with_ai(row, company_meta, client, debug=debug)
+                return result
+            except Exception as e:
+                if debug:
+                    print(f"  [DEBUG] 행 {idx} 처리 중 오류: {type(e).__name__}: {e}")
+                return None
+    
+    # 모든 행을 병렬로 처리
+    tasks = [process_row(idx, row) for idx, row in df.iterrows()]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # 결과 수집
+    for result in results:
+        if isinstance(result, Exception):
+            if debug:
+                print(f"  [DEBUG] 행 처리 중 예외: {type(result).__name__}: {result}")
+            continue
+        if result is not None:
+            executives.append(result)
     
     if debug:
-        print(f"  [DEBUG] 추출 임원 수: {len(executives)}, 스킵된 행: {skipped_count}")
+        print(f"  [DEBUG] AI 매핑 완료: {len(executives)}명 추출")
     
     return executives

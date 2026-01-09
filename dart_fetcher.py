@@ -1,12 +1,13 @@
 import os
 import re
+import asyncio
 from datetime import datetime, timedelta
 
 import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from dart_executive_html import extract_registered_executives
+from dart_executive_html import extract_registered_executives, map_executives_with_ai
 
 DART_MAIN_URL = "https://dart.fss.or.kr/dsaf001/main.do"
 
@@ -310,8 +311,13 @@ def build_dart_result(input_path: str = "input.xlsx", output_path: str = "dart_r
     df["corp_name"] = df["corp_name"].astype(str).str.strip()
     
     results = []
-    all_executives = []
+    all_executive_dfs = []  # DataFrame 리스트로 변경
     total = len(df)
+    
+    # OpenAI API 키 확인
+    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not openai_api_key:
+        raise RuntimeError("Missing OPENAI_API_KEY in .env")
     
     # 단일 루프로 통합: 각 회사에 대해 보고서 조회 및 임원 정보 수집
     for idx, row in df.iterrows():
@@ -355,13 +361,13 @@ def build_dart_result(input_path: str = "input.xlsx", output_path: str = "dart_r
             if debug:
                 print(f"  -> Found: {report_meta['type']} (rcept_no: {report_meta['rcept_no']})")
             
-            # 임원 정보 수집 (HTML 파싱)
+            # 임원 테이블 추출 (DataFrame 반환)
             if report_meta.get("rcept_no") and report_meta.get("url"):
                 if debug:
-                    print(f"  [임원정보 HTML 파싱] {corp_name} (rcp_no: {report_meta['rcept_no']})")
+                    print(f"  [임원정보 테이블 추출] {corp_name} (rcp_no: {report_meta['rcept_no']})")
                 
                 try:
-                    executives = extract_registered_executives(
+                    exec_df = extract_registered_executives(
                         rcp_no=report_meta["rcept_no"],
                         main_url=report_meta["url"],
                         corp_name=corp_name,
@@ -371,13 +377,64 @@ def build_dart_result(input_path: str = "input.xlsx", output_path: str = "dart_r
                         base_url=base_url,
                         debug=debug,
                     )
-                    all_executives.extend(executives)
-                    
-                    if debug:
-                        print(f"  -> {len(executives)}명의 임원 정보 추출 성공")
+                    if exec_df is not None and not exec_df.empty:
+                        # 회사 메타데이터와 함께 저장
+                        all_executive_dfs.append({
+                            "df": exec_df,
+                            "company_meta": {
+                                "회사": corp_name,
+                                "종목코드": stock_code,
+                                "구분": report_meta["type"],
+                                "url": report_meta["url"]
+                            }
+                        })
+                        if debug:
+                            print(f"  -> 테이블 추출 성공: {len(exec_df)}행")
+                    else:
+                        if debug:
+                            print(f"  -> 테이블 추출 실패: 빈 DataFrame")
                 except Exception as e:
                     if debug:
-                        print(f"  -> 임원 정보 추출 실패: {e}")
+                        print(f"  -> 테이블 추출 실패: {e}")
+    
+    # 모든 DataFrame을 AI로 병렬 매핑
+    if all_executive_dfs:
+        if debug:
+            print(f"\n[AI 매핑 시작] 총 {len(all_executive_dfs)}개 회사의 임원 정보를 AI로 매핑합니다...")
+        
+        async def process_all_executives():
+            all_executives = []
+            tasks = []
+            
+            for item in all_executive_dfs:
+                task = map_executives_with_ai(
+                    df=item["df"],
+                    company_meta=item["company_meta"],
+                    openai_api_key=openai_api_key,
+                    debug=debug,
+                    max_concurrent=3  # 동시 요청 수를 줄여서 Connection error 방지
+                )
+                tasks.append(task)
+            
+            results_list = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for result in results_list:
+                if isinstance(result, Exception):
+                    if debug:
+                        print(f"  [DEBUG] AI 매핑 중 오류: {result}")
+                    continue
+                if isinstance(result, list):
+                    all_executives.extend(result)
+            
+            return all_executives
+        
+        # 비동기 실행
+        all_executives = asyncio.run(process_all_executives())
+        
+        if debug:
+            print(f"\n[AI 매핑 완료] 총 {len(all_executives)}명의 임원 정보 추출")
+    else:
+        all_executives = []
 
     out_df = pd.DataFrame(results, columns=["회사", "종목코드", "구분", "url"])
     
