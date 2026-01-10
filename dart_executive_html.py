@@ -582,123 +582,6 @@ def parse_registered_executives(viewer_html: str, debug: bool = False) -> Option
         if debug:
             print(f"  [DEBUG] 테이블 파싱 실패: {e}")
         return None
-
-
-def normalize_executive_row(row: pd.Series, company_meta: Dict) -> Dict:
-    """
-    DataFrame의 한 행을 최종 컬럼 형식으로 정규화합니다.
-    
-    Args:
-        row: DataFrame의 한 행
-        company_meta: 회사 메타데이터
-    
-    Returns:
-        정규화된 임원 정보 딕셔너리 (성명이 없으면 None)
-    """
-    exec_data = {}
-    
-    # 회사 메타데이터 추가
-    exec_data["회사"] = company_meta.get("회사", "")
-    exec_data["종목코드"] = company_meta.get("종목코드", "")
-    exec_data["구분"] = company_meta.get("구분", "")
-    exec_data["url"] = company_meta.get("url", "")
-    
-    # 컬럼명을 정규화해서 매핑 (순서대로 되어 있으므로 인덱스도 고려)
-    def get_value(*token_keys):
-        """
-        토큰 기반으로 값을 찾습니다.
-        token_keys는 찾을 토큰 리스트입니다 (예: ["성명"] -> "성명" 포함 컬럼에서 찾음).
-        """
-        for token_key in token_keys:
-            norm_token = _normalize_text(token_key)
-            for col in row.index:
-                col_str = str(col)
-                norm_col = _normalize_text(col_str)
-                
-                # 토큰이 컬럼명에 포함되어 있는지 확인
-                if norm_token in norm_col:
-                    val = row[col]
-                    if pd.notna(val):
-                        return str(val).strip()
-        return ""
-    
-    # 순서대로 매핑 (일반적인 순서: 성명, 성별, 출생년월, 직위, 등기임원여부, 상근여부, 담당업무, 주요경력, 소유주식수, 최대주주와의관계, 재직기간, 임기만료일, 의결권있는 주식, 의결권없는 주식)
-    # 하지만 컬럼명이 있으므로 컬럼명으로 먼저 찾고, 없으면 인덱스로 접근
-    exec_data["성명"] = get_value("성명", "이름", "name") or (str(row.iloc[0]).strip() if len(row) > 0 else "")
-    exec_data["성별"] = get_value("성별", "gender", "sex") or (str(row.iloc[1]).strip() if len(row) > 1 else "")
-    exec_data["출생년월"] = get_value("출생년월", "생년월일", "birth", "출생") or (str(row.iloc[2]).strip() if len(row) > 2 else "")
-    exec_data["직위"] = get_value("직위", "position", "직책") or (str(row.iloc[3]).strip() if len(row) > 3 else "")
-    exec_data["등기임원여부"] = get_value("등기임원") or (str(row.iloc[4]).strip() if len(row) > 4 else "")
-    exec_data["상근여부"] = get_value("상근") or (str(row.iloc[5]).strip() if len(row) > 5 else "")
-    exec_data["담당업무"] = get_value("담당", "업무", "responsibilities") or (str(row.iloc[6]).strip() if len(row) > 6 else "")
-    exec_data["주요경력"] = get_value("경력", "주요경력", "career") or (str(row.iloc[7]).strip() if len(row) > 7 else "")
-    
-    # 소유주식수 매핑 (의결권O/X 구분)
-    voting_shares = get_value("의결권있는주식", "의결권O", "의결권있는", "voting")
-    if not voting_shares:
-        for col in row.index:
-            col_str = str(col)
-            norm_col = _normalize_text(col_str)
-            if "소유" in norm_col and "의결권" in norm_col:
-                if "있는" in norm_col or "O" in norm_col or "의결권있는주식" in norm_col:
-                    val = row[col]
-                    if pd.notna(val):
-                        voting_shares = str(val).strip()
-                        break
-    if not voting_shares and len(row) > 12:
-        voting_shares = str(row.iloc[12]).strip()
-    exec_data["소유주식수(의결권O)"] = voting_shares
-    
-    non_voting_shares = get_value("의결권없는주식", "의결권X", "의결권없는", "non_voting")
-    if not non_voting_shares:
-        for col in row.index:
-            col_str = str(col)
-            norm_col = _normalize_text(col_str)
-            if "소유" in norm_col and "의결권" in norm_col:
-                if "없는" in norm_col or "X" in norm_col or "의결권없는주식" in norm_col:
-                    val = row[col]
-                    if pd.notna(val):
-                        non_voting_shares = str(val).strip()
-                        break
-    if not non_voting_shares and len(row) > 13:
-        non_voting_shares = str(row.iloc[13]).strip()
-    exec_data["소유주식수(의결권X)"] = non_voting_shares
-    
-    exec_data["최대주주와의 관계"] = get_value("최대주주", "관계", "relationship", "주주") or (str(row.iloc[9]).strip() if len(row) > 9 else "")
-    exec_data["재직기간"] = get_value("재직", "재직기간", "tenure", "기간") or (str(row.iloc[10]).strip() if len(row) > 10 else "")
-    
-    # 임기만료일
-    term_expiration = get_value("임기", "만료", "expiration")
-    if not term_expiration:
-        for col in row.index:
-            col_str = str(col)
-            norm_col = _normalize_text(col_str)
-            if "임기" in norm_col and "만료" in norm_col:
-                val = row[col]
-                if pd.notna(val):
-                    term_expiration = str(val).strip()
-                    break
-    if not term_expiration and len(row) > 11:
-        term_expiration = str(row.iloc[11]).strip()
-    exec_data["임기만료일"] = term_expiration
-    
-    # 모든 최종 컬럼이 포함되었는지 확인 (없으면 빈 문자열로 채움)
-    final_columns = [
-        "회사", "종목코드", "구분", "url", "성명", "성별", "출생년월",
-        "직위", "등기임원여부", "상근여부", "담당업무", "주요경력",
-        "소유주식수(의결권O)", "소유주식수(의결권X)", "최대주주와의 관계",
-        "재직기간", "임기만료일"
-    ]
-    for col in final_columns:
-        if col not in exec_data:
-            exec_data[col] = ""
-    
-    # 성명이 있는 경우에만 반환
-    if exec_data["성명"]:
-        return exec_data
-    return None
-
-
 def fetch_report_xml_from_api(rcp_no: str, api_key: str, base_url: str, debug: bool = False) -> Optional[List[str]]:
     """
     DART OpenAPI의 document.xml을 통해 보고서 전문 XML 리스트를 가져옵니다.
@@ -913,6 +796,8 @@ async def map_executive_row_with_ai(
     "상근여부": "",
     "담당업무": "",
     "주요경력": "",
+    "학교": "",
+    "학과": "",
     "소유주식수(의결권O)": "",
     "소유주식수(의결권X)": "",
     "최대주주와의 관계": "",
@@ -925,6 +810,29 @@ async def map_executive_row_with_ai(
 - "직위", "position", "직책" 등 -> "직위"
 - "소유주식수"와 "의결권" 관련 컬럼 -> "소유주식수(의결권O)" 또는 "소유주식수(의결권X)"
 - "임기", "만료일" 등 -> "임기만료일"
+
+중요: "학교"와 "학과" 필드는 "주요경력" 필드에서 추출해야 합니다.
+
+1. 추출 조건:
+   - 주요경력에 "교수" 등의 교수 직함이 포함된 경우에만 추출
+   -"부교수", "조교수", "전임강사" 등은 제외합니다.
+   - 교수 직함이 없으면 "학교": "해당없음", "학과": "해당없음"으로 설정
+
+2. 추출 방법:
+   - 교수 직함이 있는 문장에서 교수 직함 앞에 나오는 학교명과 학과명을 찾으세요
+   - 예: "한성대 AI응용학과 교수" -> 학교: "한성대" 또는 "한성대학교", 학과: "AI응용학과"
+   - 예: "서울대학교 경영학과 교수" -> 학교: "서울대학교", 학과: "경영학과"
+   - 예: "고려대학교 경제학과 조교수, 연세대학교 경영대학 부교수" -> 가장 최근 교수 경력: 학교: "연세대학교", 학과: "경영대학"
+   - 예: "서울대학교 의과대학 교수" -> 학교: "서울대학교", 학과: "의과대학"
+
+3. 추출 규칙:
+   - 학교명은 "한성대", "서울대", "고려대" 같은 약칭이거나 "한성대학교", "서울대학교" 같은 전체명일 수 있습니다. 주요경력에 명시된 대로 그대로 추출하세요.
+   - 학과명은 "AI응용학과", "경영학과", "경영대학", "의과대학" 등으로 명시된 대로 추출하세요.
+   - 학교와 학과를 명확히 구분하여 각각의 필드에 정확하게 입력하세요.
+
+4. 오류 방지:
+   - 교수 직함이 없는 경우: "학교": "해당없음", "학과": "해당없음"
+   - 교수 직함이 있지만 학교명이나 학과명을 찾을 수 없는 경우: 가능한 정보만 추출하고 나머지는 빈 문자열("")
 
 JSON만 반환하고 다른 설명은 포함하지 마세요."""
 
@@ -967,7 +875,7 @@ JSON만 반환하고 다른 설명은 포함하지 마세요."""
         # 필수 필드 확인 및 기본값 설정
         required_fields = [
             "성명", "성별", "출생년월", "직위", "등기임원여부", "상근여부",
-            "담당업무", "주요경력", "소유주식수(의결권O)", "소유주식수(의결권X)",
+            "담당업무", "주요경력", "학교", "학과", "소유주식수(의결권O)", "소유주식수(의결권X)",
             "최대주주와의 관계", "재직기간", "임기만료일"
         ]
         
@@ -975,6 +883,22 @@ JSON만 반환하고 다른 설명은 포함하지 마세요."""
         for field in required_fields:
             if field not in mapped_data:
                 mapped_data[field] = ""
+        
+        # "학교"와 "학과" 필드 후처리
+        # 주요경력에서 교수 직함 확인 (교수, 부교수, 조교수, 전임강사 등)
+        has_professor = False
+        if "주요경력" in mapped_data and mapped_data["주요경력"]:
+            career_text = mapped_data["주요경력"]
+            professor_keywords = ["교수", "부교수", "조교수", "전임강사", "임용교수"]
+            has_professor = any(keyword in career_text for keyword in professor_keywords)
+        
+        # 교수 직함이 없는 경우: "해당없음" 설정
+        if not has_professor:
+            if not mapped_data.get("학교") or mapped_data.get("학교", "").strip() == "":
+                mapped_data["학교"] = "해당없음"
+            if not mapped_data.get("학과") or mapped_data.get("학과", "").strip() == "":
+                mapped_data["학과"] = "해당없음"
+        # 교수 직함이 있는 경우: 빈 값이면 그대로 유지 (AI가 추출하지 못한 경우)
         
         # 회사 메타데이터 추가
         final_data = {
@@ -1028,7 +952,7 @@ async def map_executives_with_ai(
     executives = []
     
     # 세마포어로 동시 요청 수 제한 (너무 많은 동시 요청 방지)
-    semaphore = asyncio.Semaphore(min(max_concurrent, 7))  # 최대 5개로 제한
+    semaphore = asyncio.Semaphore(min(max_concurrent, 10))  # 최대 5개로 제한
     
     async def process_row(idx, row):
         async with semaphore:

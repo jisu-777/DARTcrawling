@@ -445,15 +445,12 @@ def build_dart_result(input_path: str = "input.xlsx", output_path: str = "dart_r
         
         # 임원 현황 시트 - 지정된 컬럼 순서로 생성
         column_order = [
-            "회사", "종목코드", "구분", "url", "성명", "성별", "출생년월",
-            "직위", "등기임원여부", "상근여부", "담당업무", "주요경력",
-            "소유주식수(의결권O)", "소유주식수(의결권X)", "최대주주와의 관계",
-            "재직기간", "임기만료일"
+            "회사", "url", "성명", "담당업무", "주요경력", "학교", "학과"
         ]
         
         if all_executives:
             exec_df = pd.DataFrame(all_executives)
-            # 지정된 컬럼 순서로 정렬 (존재하지 않는 컬럼은 빈 값으로 채움)
+            # 지정된 컬럼만 선택 (존재하지 않는 컬럼은 빈 값으로 채움)
             for col in column_order:
                 if col not in exec_df.columns:
                     exec_df[col] = ""
@@ -461,7 +458,7 @@ def build_dart_result(input_path: str = "input.xlsx", output_path: str = "dart_r
             exec_df.to_excel(writer, sheet_name='임원 현황', index=False)
             print(f"\n임원 정보: {len(all_executives)}명 추출")
         else:
-            # 빈 시트 생성 (모든 컬럼 포함)
+            # 빈 시트 생성 (지정된 컬럼만 포함)
             empty_df = pd.DataFrame(columns=column_order)
             empty_df.to_excel(writer, sheet_name='임원 현황', index=False)
     
