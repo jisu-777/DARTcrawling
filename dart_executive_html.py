@@ -798,6 +798,7 @@ async def map_executive_row_with_ai(
     "주요경력": "",
     "학교": "",
     "학과": "",
+    "교수": "",
     "소유주식수(의결권O)": "",
     "소유주식수(의결권X)": "",
     "최대주주와의 관계": "",
@@ -811,28 +812,37 @@ async def map_executive_row_with_ai(
 - "소유주식수"와 "의결권" 관련 컬럼 -> "소유주식수(의결권O)" 또는 "소유주식수(의결권X)"
 - "임기", "만료일" 등 -> "임기만료일"
 
-중요: "학교"와 "학과" 필드는 "주요경력" 필드에서 추출해야 합니다.
+중요: "학교", "학과", "교수" 필드는 "담당업무" 또는 "주요경력" 필드에서 추출해야 합니다. "담당업무"를 우선적으로 확인하세요.
 
 1. 추출 조건:
-   - 주요경력에 "교수" 등의 교수 직함이 포함된 경우에만 추출
-   -"부교수", "조교수", "전임강사" 등은 제외합니다.
-   - 교수 직함이 없으면 "학교": "해당없음", "학과": "해당없음"으로 설정
+   - 담당업무 또는 주요경력에 교수 직함(교수, 부교수, 조교수, 전임강사 등)이 포함된 경우에만 추출
+   - 교수 직함이 없으면 "학교": "해당없음", "학과": "해당없음", "교수": "해당없음"으로 설정
 
 2. 추출 방법:
+   - 담당업무를 먼저 확인하고, 없으면 주요경력을 확인하세요
    - 교수 직함이 있는 문장에서 교수 직함 앞에 나오는 학교명과 학과명을 찾으세요
-   - 예: "한성대 AI응용학과 교수" -> 학교: "한성대" 또는 "한성대학교", 학과: "AI응용학과"
-   - 예: "서울대학교 경영학과 교수" -> 학교: "서울대학교", 학과: "경영학과"
-   - 예: "고려대학교 경제학과 조교수, 연세대학교 경영대학 부교수" -> 가장 최근 교수 경력: 학교: "연세대학교", 학과: "경영대학"
-   - 예: "서울대학교 의과대학 교수" -> 학교: "서울대학교", 학과: "의과대학"
+   - 교수 직함 자체를 "교수" 필드에 입력하세요 (예: "교수", "부교수", "조교수", "전임강사" 등)
+   - 예: "한성대 AI응용학과 교수" -> 학교: "한성대" 또는 "한성대학교", 학과: "AI응용학과", 교수: "교수"
+   - 예: "서울대학교 경영학과 부교수" -> 학교: "서울대학교", 학과: "경영학과", 교수: "부교수"
+   - 예: "고려대학교 경제학과 조교수" -> 학교: "고려대학교", 학과: "경제학과", 교수: "조교수"
+   - 예: "서울대학교 의과대학 교수" -> 학교: "서울대학교", 학과: "의과대학", 교수: "교수"
 
 3. 추출 규칙:
-   - 학교명은 "한성대", "서울대", "고려대" 같은 약칭이거나 "한성대학교", "서울대학교" 같은 전체명일 수 있습니다. 주요경력에 명시된 대로 그대로 추출하세요.
+   - 학교명은 "한성대", "서울대", "고려대" 같은 약칭이거나 "한성대학교", "서울대학교" 같은 전체명일 수 있습니다. 원문에 명시된 대로 그대로 추출하세요.
    - 학과명은 "AI응용학과", "경영학과", "경영대학", "의과대학" 등으로 명시된 대로 추출하세요.
+   - 교수 필드에는 정확한 직함을 입력하세요: "교수", "부교수", "조교수", "전임강사", "임용교수" 등
    - 학교와 학과를 명확히 구분하여 각각의 필드에 정확하게 입력하세요.
 
 4. 오류 방지:
-   - 교수 직함이 없는 경우: "학교": "해당없음", "학과": "해당없음"
+   - 교수 직함이 없는 경우: "학교": "해당없음", "학과": "해당없음", "교수": "해당없음"
    - 교수 직함이 있지만 학교명이나 학과명을 찾을 수 없는 경우: 가능한 정보만 추출하고 나머지는 빈 문자열("")
+
+5. 담당업무 필드 정리:
+   - 담당업무 필드에 특수기호(ㆍ, ·, • 등)나 불필요한 구분자가 포함되어 있으면 제거하고 쉼표(,)로 구분하세요
+   - 예: "ㆍDX부문장 직무대행ㆍMX사업부장" -> "DX부문장 직무대행, MX사업부장"
+   - 예: "·기획실장·인사실장" -> "기획실장, 인사실장"
+   - 여러 업무가 나열되어 있을 때는 쉼표로 구분하여 깔끔하게 정리하세요
+   - 특수기호를 모두 제거하고 자연스러운 문장으로 정리하세요
 
 JSON만 반환하고 다른 설명은 포함하지 마세요."""
 
@@ -842,8 +852,10 @@ JSON만 반환하고 다른 설명은 포함하지 마세요."""
         
         for attempt in range(max_retries):
             try:
+                # 모델명은 환경 변수에서 가져오거나 기본값 사용
+                model_name = os.getenv("OPENAI_MODEL", "azure.gpt-4o-mini")
                 response = await client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model=model_name,
                     messages=[
                         {"role": "system", "content": "당신은 DART 보고서의 임원 정보를 정규화된 형식으로 매핑하는 전문가입니다. JSON 형식으로만 응답하세요."},
                         {"role": "user", "content": prompt}
@@ -875,7 +887,7 @@ JSON만 반환하고 다른 설명은 포함하지 마세요."""
         # 필수 필드 확인 및 기본값 설정
         required_fields = [
             "성명", "성별", "출생년월", "직위", "등기임원여부", "상근여부",
-            "담당업무", "주요경력", "학교", "학과", "소유주식수(의결권O)", "소유주식수(의결권X)",
+            "담당업무", "주요경력", "학교", "학과", "교수", "소유주식수(의결권O)", "소유주식수(의결권X)",
             "최대주주와의 관계", "재직기간", "임기만료일"
         ]
         
@@ -884,13 +896,31 @@ JSON만 반환하고 다른 설명은 포함하지 마세요."""
             if field not in mapped_data:
                 mapped_data[field] = ""
         
-        # "학교"와 "학과" 필드 후처리
-        # 주요경력에서 교수 직함 확인 (교수, 부교수, 조교수, 전임강사 등)
+        # "학교", "학과", "교수" 필드 후처리
+        # 담당업무 또는 주요경력에서 교수 직함 확인 (교수, 부교수, 조교수, 전임강사 등)
         has_professor = False
-        if "주요경력" in mapped_data and mapped_data["주요경력"]:
-            career_text = mapped_data["주요경력"]
-            professor_keywords = ["교수", "부교수", "조교수", "전임강사", "임용교수"]
-            has_professor = any(keyword in career_text for keyword in professor_keywords)
+        professor_title = ""
+        
+        # 담당업무를 먼저 확인
+        duty_text = mapped_data.get("담당업무", "") or ""
+        career_text = mapped_data.get("주요경력", "") or ""
+        
+        professor_keywords = ["교수", "부교수", "조교수", "전임강사", "임용교수"]
+        
+        # 담당업무에서 교수 직함 찾기
+        for keyword in professor_keywords:
+            if keyword in duty_text:
+                has_professor = True
+                professor_title = keyword
+                break
+        
+        # 담당업무에 없으면 주요경력에서 찾기
+        if not has_professor:
+            for keyword in professor_keywords:
+                if keyword in career_text:
+                    has_professor = True
+                    professor_title = keyword
+                    break
         
         # 교수 직함이 없는 경우: "해당없음" 설정
         if not has_professor:
@@ -898,7 +928,13 @@ JSON만 반환하고 다른 설명은 포함하지 마세요."""
                 mapped_data["학교"] = "해당없음"
             if not mapped_data.get("학과") or mapped_data.get("학과", "").strip() == "":
                 mapped_data["학과"] = "해당없음"
-        # 교수 직함이 있는 경우: 빈 값이면 그대로 유지 (AI가 추출하지 못한 경우)
+            if not mapped_data.get("교수") or mapped_data.get("교수", "").strip() == "":
+                mapped_data["교수"] = "해당없음"
+        else:
+            # 교수 직함이 있는 경우: 교수 필드에 직함 설정
+            if not mapped_data.get("교수") or mapped_data.get("교수", "").strip() == "":
+                mapped_data["교수"] = professor_title
+            # 학교나 학과가 비어있으면 "해당없음"으로 설정하지 않음 (AI가 추출하지 못한 경우일 수 있음)
         
         # 회사 메타데이터 추가
         final_data = {
@@ -928,9 +964,9 @@ JSON만 반환하고 다른 설명은 포함하지 마세요."""
 async def map_executives_with_ai(
     df: pd.DataFrame,
     company_meta: Dict,
-    openai_api_key: str,
+    client: AsyncOpenAI,
     debug: bool = False,
-    max_concurrent: int = 10
+    max_concurrent: int = 3
 ) -> List[Dict]:
     """
     DataFrame의 모든 행을 AI를 사용하여 병렬로 매핑합니다.
@@ -938,9 +974,9 @@ async def map_executives_with_ai(
     Args:
         df: 임원 테이블 DataFrame
         company_meta: 회사 메타데이터
-        openai_api_key: OpenAI API 키
+        client: AsyncOpenAI 클라이언트 (재사용을 위해 외부에서 주입)
         debug: 디버그 로그 출력 여부
-        max_concurrent: 최대 동시 요청 수
+        max_concurrent: 최대 동시 요청 수 (행 단위 동시성)
     
     Returns:
         정규화된 임원 정보 리스트
@@ -948,11 +984,10 @@ async def map_executives_with_ai(
     if df is None or df.empty:
         return []
     
-    client = AsyncOpenAI(api_key=openai_api_key)
     executives = []
     
-    # 세마포어로 동시 요청 수 제한 (너무 많은 동시 요청 방지)
-    semaphore = asyncio.Semaphore(min(max_concurrent, 10))  # 최대 5개로 제한
+    # 세마포어로 동시 요청 수 제한 (행 단위 동시성)
+    semaphore = asyncio.Semaphore(max_concurrent)
     
     async def process_row(idx, row):
         async with semaphore:
