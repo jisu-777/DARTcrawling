@@ -5,3 +5,5 @@ python-dotenv
 beautifulsoup4
 lxml
 openai
+httpx
+pyarrow

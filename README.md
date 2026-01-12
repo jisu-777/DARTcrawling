@@ -4,6 +4,10 @@ DART(전자공시시스템)에서 기업 보고서를 가져와 임원 정보를
 
 ## 주요 기능
 
+- **3단계 파이프라인**: 수집 → LLM 매핑 → 병합으로 분리하여 성능 및 안정성 향상
+- **네트워크 I/O와 CPU 파싱 분리**: httpx 비동기 HTTP + ProcessPoolExecutor로 병렬 효율 극대화
+- **배치 처리**: LLM 요청을 배치로 묶어 처리하여 효율성 향상
+- **체크포인트 및 재시작**: 중단 후 재시작 가능
 - DART OpenAPI를 통한 기업 보고서 자동 수집
 - XML/HTML에서 임원 정보 테이블 자동 추출
 - AI를 활용한 임원 정보 정규화 및 매핑
@@ -84,7 +88,69 @@ OPENAI_MODEL=azure.gpt-4o-mini
 
 ## 사용 방법
 
-### 기본 사용
+### 3단계 파이프라인 (권장)
+
+성능과 안정성을 위해 3단계 파이프라인으로 분리되어 있습니다:
+
+#### Stage 1: 데이터 수집
+
+```bash
+python stage1_collect.py \
+    --input input.xlsx \
+    --out collected_rows.parquet \
+    --years-back 3 \
+    --workers-http 10 \
+    --workers-cpu 4 \
+    --checkpoint-interval 100 \
+    --resume
+```
+
+**파라미터:**
+- `--input`: 입력 엑셀 파일
+- `--out`: 출력 파일 (parquet 또는 csv)
+- `--years-back`: 검색할 연도 범위
+- `--workers-http`: HTTP 동시 요청 수
+- `--workers-cpu`: CPU 프로세스 워커 수
+- `--checkpoint-interval`: N개 회사마다 체크포인트 저장
+- `--resume`: 기존 파일에서 재시작
+
+#### Stage 2: LLM 매핑
+
+```bash
+python stage2_map_llm.py \
+    --in collected_rows.parquet \
+    --out mapped.parquet \
+    --concurrency 5 \
+    --batch-size 10 \
+    --checkpoint-interval 1000 \
+    --resume
+```
+
+**파라미터:**
+- `--in`: Stage1 출력 파일
+- `--out`: 매핑 결과 파일
+- `--concurrency`: LLM 동시 요청 수
+- `--batch-size`: 배치 크기 (5-20 권장)
+- `--checkpoint-interval`: N개 row마다 체크포인트 저장
+- `--resume`: 기존 파일에서 재시작
+
+#### Stage 3: 최종 병합
+
+```bash
+python stage3_merge_export.py \
+    --input-xlsx input.xlsx \
+    --mapped mapped.parquet \
+    --out dart_result.xlsx \
+    --no-dedupe  # 중복 제거 비활성화 (선택적)
+```
+
+**파라미터:**
+- `--input-xlsx`: 원본 입력 엑셀 파일
+- `--mapped`: Stage2 출력 파일
+- `--out`: 최종 출력 엑셀 파일
+- `--no-dedupe`: 중복 제거 비활성화
+
+### 기존 방식 (단일 스크립트)
 
 ```python
 from dart_fetcher import build_dart_result
@@ -92,23 +158,16 @@ from dart_fetcher import build_dart_result
 output_path = build_dart_result(
     input_path="input.xlsx",
     output_path="dart_result.xlsx",
-    years_back=3,  # 검색할 연도 범위
-    debug=True,    # 디버그 정보 출력
+    years_back=3,
+    debug=True,
 )
 ```
 
-### main.py 실행
+또는
 
 ```bash
 python main.py
 ```
-
-### 파라미터 설명
-
-- `input_path`: 입력 엑셀 파일 경로 (기본값: "input.xlsx")
-- `output_path`: 출력 엑셀 파일 경로 (기본값: "dart_result.xlsx")
-- `years_back`: 검색할 연도 범위 (기본값: 3)
-- `debug`: 디버그 정보 출력 여부 (기본값: False)
 
 ## 출력 형식
 

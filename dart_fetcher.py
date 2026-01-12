@@ -7,7 +7,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from dart_executive_html import extract_registered_executives, map_executives_with_ai
+from dart_executive_html import extract_registered_executives, map_executive_row_with_ai
 from openai import AsyncOpenAI
 
 DART_MAIN_URL = "https://dart.fss.or.kr/dsaf001/main.do"
@@ -343,26 +343,26 @@ def build_dart_result(input_path: str = "input.xlsx", output_path: str = "dart_r
     else:
         client = AsyncOpenAI(api_key=openai_api_key)
     
-    # 회사 단위 스트리밍 파이프라인: 각 회사 처리 후 즉시 AI 매핑
-    async def process_company(idx, row):
-        """회사 1개를 처리하는 비동기 함수"""
+    # 배치 파이프라인: 1단계 - 모든 회사의 테이블 먼저 수집
+    async def process_company_collect(idx, row):
+        """회사 1개를 처리하여 테이블만 추출 (AI 매핑 제외)"""
         corp_code_raw = str(row.get("corp_code", "")).strip()
         corp_name = str(row.get("corp_name", "")).strip()
-        stock_code = normalize_stock_code(row.get("stock_code"))  # Only for output display
+        stock_code = normalize_stock_code(row.get("stock_code"))
         
-        # Normalize corp_code to 8 digits
         corp_code = normalize_corp_code(corp_code_raw)
         
-        # Skip invalid corp_code
         if not corp_code or len(corp_code) != 8:
             if debug:
-                print(f"[{idx+1}/{total}] Skipping row {idx+1}: invalid corp_code (raw: {corp_code_raw}, normalized: {corp_code})")
-            return {"result": {"회사": corp_name, "종목코드": stock_code, "구분": "코드오류", "url": ""}, "executives": []}
+                print(f"[{idx+1}/{total}] Skipping row {idx+1}: invalid corp_code")
+            return {
+                "result": {"회사": corp_name, "종목코드": stock_code, "구분": "코드오류", "url": ""},
+                "exec_df": None
+            }
 
         if debug:
             print(f"[{idx+1}/{total}] Processing: {corp_name} (corp_code: {corp_code}, stock_code: {stock_code})")
 
-        # 동기 함수를 비동기로 실행 (I/O 블로킹 방지)
         report_meta = await asyncio.to_thread(
             fetch_latest_periodic_report,
             corp_code=corp_code,
@@ -373,7 +373,10 @@ def build_dart_result(input_path: str = "input.xlsx", output_path: str = "dart_r
         )
 
         if report_meta is None:
-            return {"result": {"회사": corp_name, "종목코드": stock_code, "구분": "정보없음", "url": ""}, "executives": []}
+            return {
+                "result": {"회사": corp_name, "종목코드": stock_code, "구분": "정보없음", "url": ""},
+                "exec_df": None
+            }
         
         result_item = {
             "회사": corp_name,
@@ -385,14 +388,13 @@ def build_dart_result(input_path: str = "input.xlsx", output_path: str = "dart_r
         if debug:
             print(f"  -> Found: {report_meta['type']} (rcept_no: {report_meta['rcept_no']})")
         
-        # 임원 테이블 추출 후 즉시 AI 매핑 수행 (스트리밍 방식)
-        executives = []
+        # 테이블만 추출 (AI 매핑은 나중에)
+        exec_df = None
         if report_meta.get("rcept_no") and report_meta.get("url"):
             if debug:
                 print(f"  [임원정보 테이블 추출] {corp_name} (rcp_no: {report_meta['rcept_no']})")
             
             try:
-                # 동기 함수를 비동기로 실행
                 exec_df = await asyncio.to_thread(
                     extract_registered_executives,
                     rcp_no=report_meta["rcept_no"],
@@ -407,31 +409,7 @@ def build_dart_result(input_path: str = "input.xlsx", output_path: str = "dart_r
                 
                 if exec_df is not None and not exec_df.empty:
                     if debug:
-                        print(f"  -> 테이블 추출 성공: {len(exec_df)}행, AI 매핑 시작...")
-                    
-                    # 회사 메타데이터 구성
-                    company_meta = {
-                        "회사": corp_name,
-                        "종목코드": stock_code,
-                        "구분": report_meta["type"],
-                        "url": report_meta["url"]
-                    }
-                    
-                    # 즉시 AI 매핑 수행
-                    try:
-                        executives = await map_executives_with_ai(
-                            df=exec_df,
-                            company_meta=company_meta,
-                            client=client,
-                            debug=debug,
-                            max_concurrent=3  # 행 단위 동시성 제한
-                        )
-                        if executives:
-                            if debug:
-                                print(f"  -> AI 매핑 완료: {len(executives)}명 추출")
-                    except Exception as e:
-                        if debug:
-                            print(f"  -> AI 매핑 실패: {e}")
+                        print(f"  -> 테이블 추출 성공: {len(exec_df)}행")
                 else:
                     if debug:
                         print(f"  -> 테이블 추출 실패: 빈 DataFrame")
@@ -439,74 +417,150 @@ def build_dart_result(input_path: str = "input.xlsx", output_path: str = "dart_r
                 if debug:
                     print(f"  -> 테이블 추출 실패: {e}")
         
-        return {"result": result_item, "executives": executives}
+        return {"result": result_item, "exec_df": exec_df}
     
-    # 회사 단위 bounded concurrency로 처리 (동시 2~3개 회사 처리)
-    async def process_all_companies():
-        """모든 회사를 bounded concurrency로 처리"""
-        company_semaphore = asyncio.Semaphore(3)  # 회사 단위 동시성 제한 (1~3개)
-        checkpoint_interval = 100  # 100개 회사마다 체크포인트 저장
+    # 배치 파이프라인: 1단계 - 모든 회사의 테이블 먼저 수집
+    async def collect_all_tables():
+        """모든 회사의 테이블을 먼저 수집 (AI 매핑 제외)"""
+        company_semaphore = asyncio.Semaphore(50)  # 회사 단위 동시성 제한 (50개)
         
         async def process_with_semaphore(idx, row):
             async with company_semaphore:
-                return await process_company(idx, row)
+                return await process_company_collect(idx, row)
         
-        # 회사 목록을 iterator로 변환
-        company_iter = iter(df.iterrows())
+        # 모든 회사 처리
+        tasks = [process_with_semaphore(idx, row) for idx, row in df.iterrows()]
+        collected_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 결과 수집
+        all_tables = []  # (result_item, exec_df, company_meta) 튜플 리스트
+        for result in collected_results:
+            if isinstance(result, Exception):
+                if debug:
+                    print(f"  [DEBUG] 회사 처리 중 오류: {result}")
+                continue
+            if isinstance(result, dict):
+                results.append(result["result"])
+                if result["exec_df"] is not None and not result["exec_df"].empty:
+                    company_meta = {
+                        "회사": result["result"]["회사"],
+                        "종목코드": result["result"]["종목코드"],
+                        "구분": result["result"]["구분"],
+                        "url": result["result"]["url"]
+                    }
+                    all_tables.append((result["result"], result["exec_df"], company_meta))
+        
+        if debug:
+            print(f"\n[1단계 완료] 총 {len(all_tables)}개 회사의 테이블 수집 완료")
+        
+        return all_tables
+    
+    # 배치 파이프라인: 2단계 - 모든 테이블을 LLM에 일괄 처리 (체크포인트 포함)
+    async def map_all_tables_with_ai(all_tables, checkpoint_interval: int = 100):
+        """수집된 모든 테이블을 LLM에 일괄 처리 (중간 저장 포함)"""
+        if debug:
+            print(f"\n[2단계 시작] {len(all_tables)}개 회사의 테이블을 LLM에 일괄 처리...")
+        
+        # 모든 테이블의 모든 행을 하나의 리스트로 모음
+        all_rows_to_map = []
+        for result_item, exec_df, company_meta in all_tables:
+            for idx, row in exec_df.iterrows():
+                all_rows_to_map.append((row, company_meta))
+        
+        if debug:
+            print(f"  총 {len(all_rows_to_map)}개 행을 LLM에 처리합니다")
+        
+        # 체크포인트 파일 경로
+        checkpoint_path = output_path.replace(".xlsx", "_llm_checkpoint.csv")
+        last_checkpoint_count = 0
+        
+        # 세마포어로 동시 요청 수 제한 (50개)
+        semaphore = asyncio.Semaphore(50)
         completed_count = 0
-        pending_tasks = {}
-        max_pending = 3  # 동시에 최대 3개 태스크만 유지
         
-        # 초기 태스크 시작
-        for _ in range(min(max_pending, len(df))):
-            try:
-                idx, row = next(company_iter)
-                task = asyncio.create_task(process_with_semaphore(idx, row))
-                pending_tasks[task] = idx
-            except StopIteration:
-                break
-        
-        # 태스크 풀을 유지하면서 순차적으로 처리
-        while pending_tasks:
-            done, pending = await asyncio.wait(
-                pending_tasks.keys(),
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            
-            for task in done:
-                idx = pending_tasks.pop(task)
-                try:
-                    result = await task
-                    if isinstance(result, dict):
-                        results.append(result["result"])
-                        if result["executives"]:
-                            all_executives.extend(result["executives"])
+        async def map_row_with_semaphore(row, company_meta):
+            nonlocal completed_count, last_checkpoint_count
+            async with semaphore:
+                result = await map_executive_row_with_ai(row, company_meta, client, debug=debug)
+                completed_count += 1
+                
+                # 결과 저장
+                if result is not None:
+                    all_executives.append(result)
                     
-                    completed_count += 1
-                    
-                    # 체크포인트 저장 (100개 회사마다)
-                    if completed_count % checkpoint_interval == 0:
-                        checkpoint_path = output_path.replace(".xlsx", f"_checkpoint_{completed_count}.csv")
-                        if all_executives:
+                    # 체크포인트 저장 (일정 간격마다)
+                    if len(all_executives) - last_checkpoint_count >= checkpoint_interval:
+                        try:
                             checkpoint_df = pd.DataFrame(all_executives)
                             checkpoint_df.to_csv(checkpoint_path, index=False, encoding='utf-8-sig')
+                            last_checkpoint_count = len(all_executives)
                             if debug:
-                                print(f"  [체크포인트 저장] {completed_count}개 회사 처리 완료, {len(all_executives)}명 임원 정보 저장: {checkpoint_path}")
+                                print(f"  [체크포인트 저장] {completed_count}/{len(all_rows_to_map)} 행 처리, {len(all_executives)}명 매핑 완료 → {checkpoint_path}")
+                        except Exception as e:
+                            if debug:
+                                print(f"  [DEBUG] 체크포인트 저장 실패: {e}")
+                
+                # 진행률 로그
+                if completed_count % 50 == 0 or completed_count == len(all_rows_to_map):
+                    if debug:
+                        print(f"  [진행률] {completed_count}/{len(all_rows_to_map)} 행 처리 완료 ({len(all_executives)}명 매핑)")
+                
+                return result
+        
+        # 모든 행을 병렬로 처리 (50개씩 배치로 나눠서 처리)
+        batch_size = 500  # 500개씩 배치로 나눠서 처리
+        total_batches = (len(all_rows_to_map) + batch_size - 1) // batch_size
+        
+        for batch_idx in range(total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(all_rows_to_map))
+            batch_rows = all_rows_to_map[start_idx:end_idx]
+            
+            if debug:
+                print(f"  [배치 {batch_idx + 1}/{total_batches}] {len(batch_rows)}개 행 처리 중...")
+            
+            # 배치 내에서 병렬 처리
+            tasks = [map_row_with_semaphore(row, company_meta) for row, company_meta in batch_rows]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 배치 완료 후 체크포인트 저장
+            if len(all_executives) > last_checkpoint_count:
+                try:
+                    checkpoint_df = pd.DataFrame(all_executives)
+                    checkpoint_df.to_csv(checkpoint_path, index=False, encoding='utf-8-sig')
+                    last_checkpoint_count = len(all_executives)
+                    if debug:
+                        print(f"  [배치 완료] 체크포인트 저장: {len(all_executives)}명 매핑 완료")
                 except Exception as e:
                     if debug:
-                        print(f"  [DEBUG] 회사 처리 중 오류 (idx={idx}): {e}")
-                    completed_count += 1
-                
-                # 새 태스크 시작 (남은 회사가 있는 경우)
-                try:
-                    idx, row = next(company_iter)
-                    new_task = asyncio.create_task(process_with_semaphore(idx, row))
-                    pending_tasks[new_task] = idx
-                except StopIteration:
-                    pass
+                        print(f"  [DEBUG] 배치 체크포인트 저장 실패: {e}")
+        
+        if debug:
+            print(f"\n[2단계 완료] 총 {len(all_executives)}명의 임원 정보 추출 완료")
     
-    # 비동기 실행
-    asyncio.run(process_all_companies())
+    # 배치 파이프라인 실행
+    async def run_pipeline():
+        # 1단계: 모든 테이블 수집
+        all_tables = await collect_all_tables()
+        
+        # 1단계 완료 후 체크포인트 저장 (테이블 데이터)
+        if all_tables:
+            checkpoint_tables_path = output_path.replace(".xlsx", "_tables_checkpoint.pkl")
+            try:
+                import pickle
+                with open(checkpoint_tables_path, 'wb') as f:
+                    pickle.dump(all_tables, f)
+                if debug:
+                    print(f"  [1단계 체크포인트 저장] {len(all_tables)}개 회사의 테이블 데이터 저장 → {checkpoint_tables_path}")
+            except Exception as e:
+                if debug:
+                    print(f"  [DEBUG] 테이블 체크포인트 저장 실패: {e}")
+        
+        # 2단계: LLM 매핑 (체크포인트 포함)
+        if all_tables:
+            await map_all_tables_with_ai(all_tables, checkpoint_interval=100)
+    
+    asyncio.run(run_pipeline())
     
     if debug and all_executives:
         print(f"\n[AI 매핑 완료] 총 {len(all_executives)}명의 임원 정보 추출")
