@@ -81,16 +81,62 @@ def parse_registered_executives_from_xml(xml_text: str, debug: bool = False) -> 
             soup = BeautifulSoup(xml_text, 'html.parser')
         
         # "가. 등기임원" 또는 "가. 임원 현황" 텍스트를 포함하는 요소 찾기
-        target_table = None
-        keywords = ["가. 등기임원", "가. 임원 현황", "등기임원", "임원 현황"]
+        # 점수 기반으로 최적의 테이블 선택
+        candidate_tables = []  # (table, score, keyword) 튜플 리스트
+        
+        # 키워드와 점수 정의 (높은 점수가 우선순위 높음)
+        keyword_scores = {
+            "가. 임원의 현황": 100,  # 최우선
+            "가. 등기임원": 90,
+            "가. 임원 현황": 85,
+            "등기임원": 70,
+            "임원 현황": 60,
+            # "나."로 시작하는 것은 낮은 점수 또는 제외
+            "나. 등기임원의 타회사 겸직 현황": -10,  # 제외 대상
+            "나. 등기임원": -10,
+            "나. 임원": -10,
+        }
         
         # 모든 텍스트 노드에서 키워드 찾기
-        for keyword in keywords:
+        for keyword, base_score in keyword_scores.items():
             # 텍스트로 검색 (정규식 사용)
             pattern = re.compile(re.escape(keyword))
             for element in soup.find_all(string=pattern):
                 if debug:
-                    print(f"  [DEBUG] 키워드 '{keyword}' 발견")
+                    print(f"  [DEBUG] 키워드 '{keyword}' 발견 (기본 점수: {base_score})")
+                
+                # 제목에 "겸직"이 포함되어 있는지 확인
+                # 요소의 부모나 이전 형제 요소에서 제목 텍스트 확인
+                has_concurrent = False
+                
+                # 요소 자체의 텍스트 확인 (키워드가 포함된 문자열)
+                element_text = str(element) if element else ""
+                if "겸직" in element_text:
+                    has_concurrent = True
+                    if debug:
+                        print(f"  [DEBUG] 요소 텍스트에 '겸직' 포함 감지: {element_text[:100]}")
+                
+                # 부모 요소의 텍스트도 확인
+                parent = element.parent if hasattr(element, 'parent') else None
+                if parent and not has_concurrent:
+                    # 부모 요소의 텍스트 확인
+                    parent_text = parent.get_text() if hasattr(parent, 'get_text') else str(parent)
+                    # 이전 형제 요소들도 확인
+                    prev_siblings = []
+                    if hasattr(parent, 'previous_siblings'):
+                        for sibling in parent.previous_siblings:
+                            if hasattr(sibling, 'get_text'):
+                                prev_siblings.append(sibling.get_text())
+                            elif hasattr(sibling, 'string') and sibling.string:
+                                prev_siblings.append(str(sibling.string))
+                    # 키워드 주변 텍스트 확인 (앞뒤 200자)
+                    context_text = parent_text[:200] if len(parent_text) > 200 else parent_text
+                    context_text += " ".join(prev_siblings[:2])  # 최근 형제 2개만
+                    
+                    if "겸직" in context_text:
+                        has_concurrent = True
+                        if debug:
+                            print(f"  [DEBUG] 제목에 '겸직' 포함 감지: {context_text[:100]}")
                 
                 # 이 요소 이후의 첫 번째 table 찾기
                 for table in element.find_all_next('table'):
@@ -105,18 +151,44 @@ def parse_registered_executives_from_xml(xml_text: str, debug: bool = False) -> 
                         ("임기" in norm_text or "임기만료일" in norm_text)
                     )
                     
-                    if debug:
-                        print(f"  [DEBUG] 테이블 후보: 토큰={token_count}, 가산점={has_bonus}, 텍스트 샘플={norm_text[:100]}")
+                    # 점수 계산
+                    score = base_score
+                    if token_count >= 6:
+                        score += 20  # 토큰 가산점
+                    if has_bonus:
+                        score += 15  # 보너스 가산점
                     
-                    if token_count >= 6 or has_bonus:
-                        target_table = table
+                    # 제목에 "겸직"이 포함된 경우 점수를 크게 낮춤
+                    if has_concurrent:
+                        score -= 50  # 겸직 관련 테이블은 우선순위를 크게 낮춤
                         if debug:
-                            print(f"  [DEBUG] XML에서 타겟 테이블 탐지 성공 (토큰: {token_count})")
-                        break
-                if target_table:
-                    break
-            if target_table:
-                break
+                            print(f"  [DEBUG] '겸직' 포함으로 인한 점수 감소: {score}")
+                    
+                    # 음수 점수는 제외 (나. 등기임원의 타회사 겸직 현황 등)
+                    if score < 0:
+                        if debug:
+                            print(f"  [DEBUG] 테이블 제외 (음수 점수): {score}")
+                        continue
+                    
+                    if debug:
+                        print(f"  [DEBUG] 테이블 후보: 키워드={keyword}, 점수={score}, 토큰={token_count}, 가산점={has_bonus}, 겸직={has_concurrent}, 텍스트 샘플={norm_text[:100]}")
+                    
+                    # 조건을 만족하는 테이블만 후보에 추가
+                    if token_count >= 6 or has_bonus:
+                        candidate_tables.append((table, score, keyword))
+                        if debug:
+                            print(f"  [DEBUG] 후보 테이블 추가: 점수={score}")
+        
+        # 점수가 가장 높은 테이블 선택
+        target_table = None
+        if candidate_tables:
+            # 점수 기준으로 정렬 (높은 점수 우선)
+            candidate_tables.sort(key=lambda x: x[1], reverse=True)
+            target_table = candidate_tables[0][0]
+            if debug:
+                print(f"  [DEBUG] 최종 선택된 테이블: 점수={candidate_tables[0][1]}, 키워드={candidate_tables[0][2]}")
+                if len(candidate_tables) > 1:
+                    print(f"  [DEBUG] 후보 테이블 수: {len(candidate_tables)}, 최고 점수: {candidate_tables[0][1]}, 두 번째 점수: {candidate_tables[1][1] if len(candidate_tables) > 1 else 'N/A'}")
         
         if not target_table:
             if debug:

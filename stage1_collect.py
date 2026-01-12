@@ -102,9 +102,12 @@ def extract_xml_from_zip(zip_content: bytes) -> List[Tuple[int, str, str]]:
                         xml_text = xml_data.decode('utf-8', errors='ignore')
                 
                 # 간단히 키워드 확인 (정확한 파싱은 extract_rows_from_xml에서)
+                # 우선순위: "가. 임원의 현황" > "가. 등기임원" > "가. 임원 현황" > 기타
                 table_hint = ""
-                if "등기임원" in xml_text or "임원 현황" in xml_text:
-                    if "가. 등기임원" in xml_text:
+                if "등기임원" in xml_text or "임원 현황" in xml_text or "임원의 현황" in xml_text:
+                    if "가. 임원의 현황" in xml_text:
+                        table_hint = "가. 임원의 현황"
+                    elif "가. 등기임원" in xml_text:
                         table_hint = "가. 등기임원"
                     elif "가. 임원 현황" in xml_text:
                         table_hint = "가. 임원 현황"
@@ -585,10 +588,6 @@ def save_checkpoint(rows: List[Dict], output_path: str, append: bool = True):
         logger.info(f"Checkpoint saved: {len(result_df)} total rows")
     except Exception as e:
         logger.error(f"Failed to save checkpoint: {e}")
-    
-    finally:
-        cpu_executor.shutdown(wait=True)
-        stop_event.set()
 
 
 def main():
